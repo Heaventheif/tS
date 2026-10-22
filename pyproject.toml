@@ -1,0 +1,8 @@
+[project]
+name = "tiktok-video-search"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = ["curl_cffi"]
+
+[tool.vercel]
+entrypoint = "api.search:handler"

@@ -1,10 +1,10 @@
 """Search TikTok by keyword and print the video URLs.
 
-    python main.py "nasa"                         # 20 URLs
-    python main.py "nasa" -n 100                  # 100 URLs (pages automatically)
-    python main.py "nasa" -n 50 --sort likes --published month
-    python main.py "nasa" -n 50 -o urls.txt       # save one URL per line
-    python main.py "nasa" -n 50 --json -o out.json  # full records as JSON
+    python cli.py "nasa"                         # 20 URLs
+    python cli.py "nasa" -n 100                  # 100 URLs (pages automatically)
+    python cli.py "nasa" -n 50 --sort likes --published month
+    python cli.py "nasa" -n 50 -o urls.txt       # save one URL per line
+    python cli.py "nasa" -n 50 --json -o out.json  # full records as JSON
 
 Environment: TIKTOK_PROXY=http://user:pass@host:port (optional).
 """

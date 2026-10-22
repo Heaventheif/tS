@@ -9,11 +9,11 @@ python -m pip install -r requirements-dev.txt
 
 ## Command line
 ```bash
-python main.py "nasa"                                   # 20 URLs, one per line
-python main.py "nasa" -n 100                            # pages automatically (20 per page)
-python main.py "nasa" -n 50 --sort likes --published month
-python main.py "nasa" -n 50 -o urls.txt                 # save to a file
-python main.py "nasa" -n 50 --json -o videos.json       # full records
+python cli.py "nasa"                                   # 20 URLs, one per line
+python cli.py "nasa" -n 100                            # pages automatically (20 per page)
+python cli.py "nasa" -n 50 --sort likes --published month
+python cli.py "nasa" -n 50 -o urls.txt                 # save to a file
+python cli.py "nasa" -n 50 --json -o videos.json       # full records
 ```
 
 | option | meaning |
@@ -71,7 +71,7 @@ python -m pytest -q     # offline, no network
 
 ## Layout
 ```
-main.py                  command line
+cli.py                   command line
 api/search.py            Vercel endpoint (/api/search)
 vercel.json              function timeout + /search rewrite
 tiktok_search/search.py  search + automatic paging + parsing
