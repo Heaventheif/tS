@@ -1,4 +1,7 @@
 {
   "functions": { "api/search.py": { "maxDuration": 60 } },
-  "rewrites": [{ "source": "/search", "destination": "/api/search" }]
+  "rewrites": [
+    { "source": "/", "destination": "/api/search" },
+    { "source": "/search", "destination": "/api/search" }
+  ]
 }

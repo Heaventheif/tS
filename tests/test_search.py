@@ -145,6 +145,7 @@ def test_api_handler(monkeypatch):
     assert status == 200 and json.loads(body)["urls"] == ["https://x/1"] and "s-maxage" in extra["Cache-Control"]
     assert calls[0][:2] == ("nasa", 40) and calls[0][2]["sort"] == "likes" and calls[0][2]["country"] == "de"
     assert A.run("q=nasa&format=urls", {})[2] == "https://x/1"
+    assert A.run("", {})[0] == 200 and "usage" in A.run("", {})[2] and len(calls) == 2
     for bad in ("q=a&limit=0", "q=a&limit=61", "q=a&limit=x", "q=a&format=xml", "q=a&country=usa"):
         assert A.run(bad, {})[0] == 400
     monkeypatch.setenv("API_KEY", "s3cret")

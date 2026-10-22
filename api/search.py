@@ -37,6 +37,9 @@ def run(query_string, headers):
     def reply(status, data):
         return status, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False), {}
 
+    if "q" not in qs and not qs.get("cursor"):       # bare / or /api/search: usage + health
+        return reply(200, {"status": "ok", "usage": "/api/search?q=nasa&limit=20&sort=likes&published=month"})
+
     key = os.environ.get("API_KEY")
     if key:
         given = headers.get("x-api-key") or qs.get("key") or ""
