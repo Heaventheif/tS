@@ -8,9 +8,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: E402
 
 from tiktok_search import client as C, search as S, signer  # noqa: E402
+from tiktok_search import store as ST  # noqa: E402
 from tiktok_search.errors import Blocked  # noqa: E402
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path, monkeypatch):
+    """Never touch a real database from the tests."""
+    for var in ("DATABASE_URL", "POSTGRES_URL", "VERCEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TIKTOK_DB", str(tmp_path / "seen.db"))
 
 
 def payload():
@@ -141,10 +150,10 @@ def test_api_handler(monkeypatch):
                 "next_cursor": None, "has_more": False, "error": None}
 
     monkeypatch.setattr(A, "search_videos", fake)
-    status, ctype, body, extra = A.run("q=nasa&limit=40&sort=likes&published=month&country=DE", {})
+    status, ctype, body, extra = A.run("q=nasa&limit=40&sort=likes&published=month&country=DE&dedupe=0", {})
     assert status == 200 and json.loads(body)["urls"] == ["https://x/1"] and "s-maxage" in extra["Cache-Control"]
     assert calls[0][:2] == ("nasa", 40) and calls[0][2]["sort"] == "likes" and calls[0][2]["country"] == "de"
-    assert A.run("q=nasa&format=urls", {})[2] == "https://x/1"
+    assert A.run("q=nasa&format=urls&dedupe=0", {})[2] == "https://x/1"
     assert A.run("", {})[0] == 200 and "usage" in A.run("", {})[2] and len(calls) == 2
     for bad in ("q=a&limit=0", "q=a&limit=61", "q=a&limit=x", "q=a&format=xml", "q=a&country=usa"):
         assert A.run(bad, {})[0] == 400
@@ -166,3 +175,111 @@ def test_api_handler(monkeypatch):
 def test_bad_cursor_rejected():
     with pytest.raises(ValueError):
         S._split_cursor("not-a-cursor")
+
+
+# ---- history database (no repeated links) ----------------------------------------------------
+
+def new_store(tmp_path):
+    return ST.SQLiteStore.connect(str(tmp_path / "t.db"))
+
+
+def test_keyword_normalisation():
+    n = ST.normalize_keyword
+    assert n("  NASA   Moon ") == n("nasa moon") == "nasa moon"
+    assert n("ＮＡＳＡ") == "nasa" and n("") == "" and n(None) == ""
+
+
+def test_store_claim_known_forget(tmp_path):
+    st = new_store(tmp_path)
+    vids = [{"id": "1", "url": "u1"}, {"id": "2", "url": "u2"}]
+    assert st.claim("NASA", vids) == vids
+    assert st.claim(" nasa ", vids) == []                      # same keyword, already delivered
+    assert st.claim("nasa", [{"id": "3", "url": "u3"}]) == [{"id": "3", "url": "u3"}]
+    assert st.known_ids("Nasa", ["1", "2", "9"]) == {"1", "2"}
+    assert st.known_ids("other", ["1"]) == set()               # histories are per keyword
+    assert st.claim("other", [{"id": "1", "url": "u1"}]) != []
+    assert st.count("nasa") == 3 and st.known_ids("nasa", []) == set()
+    assert st.forget("nasa") == 3 and st.count("nasa") == 0 and st.count("other") == 1
+    st.close()
+
+
+def test_store_survives_reopen(tmp_path):
+    st = new_store(tmp_path)
+    st.claim("nasa", [{"id": "1", "url": "u1"}])
+    st.close()
+    st = new_store(tmp_path)
+    assert st.known_ids("nasa", ["1"]) == {"1"}
+    st.close()
+
+
+def test_repeated_search_never_repeats_a_link(tmp_path):
+    st = new_store(tmp_path)
+    def pages():          # the same 3 pages every time: TikTok returns an overlapping set per request
+        return [make_page(0, 20, True, 20), make_page(20, 20, True, 40), make_page(40, 20, False, 60)]
+    r1 = S.search_videos("nasa", 20, client=FakeClient(pages()), pause=0, store=st)
+    r2 = S.search_videos("nasa", 20, client=FakeClient(pages()), pause=0, store=st)
+    r3 = S.search_videos("nasa", 30, client=FakeClient(pages()), pause=0, store=st)
+    ids = [v["id"] for r in (r1, r2, r3) for v in r["videos"]]
+    assert len(ids) == 70 - 10 and len(set(ids)) == len(ids)   # 60 distinct videos exist, 60 delivered
+    assert r1["video_count"] == r2["video_count"] == 20 and r3["video_count"] == 20
+    assert r2["skipped_seen"] == 20 and r3["skipped_seen"] == 40
+    assert r3["exhausted"] is True
+    r4 = S.search_videos("nasa", 20, client=FakeClient(pages()), pause=0, store=st)
+    assert r4["video_count"] == 0 and r4["exhausted"] is True
+    st.close()
+
+
+def test_overshoot_is_not_recorded(tmp_path):
+    st = new_store(tmp_path)
+    r = S.search_videos("nasa", 5, client=FakeClient([make_page(0, 20, True, 20)]), pause=0, store=st)
+    assert r["video_count"] == 5 and st.count("nasa") == 5     # the other 15 stay available next time
+    r = S.search_videos("nasa", 5, client=FakeClient([make_page(0, 20, True, 20)]), pause=0, store=st)
+    assert [v["id"] for v in r["videos"]] == ["1005", "1006", "1007", "1008", "1009"]
+    st.close()
+
+
+def test_without_store_behaviour_is_unchanged():
+    r = S.search_videos("nasa", 5, client=FakeClient([make_page(0, 20, True, 20)]), pause=0)
+    assert r["video_count"] == 5 and r["deduplicated"] is False and r["exhausted"] is False
+
+
+def test_open_store_selection(tmp_path, monkeypatch):
+    assert isinstance(ST.open_store(), ST.SQLiteStore)                       # $TIKTOK_DB from the fixture
+    monkeypatch.delenv("TIKTOK_DB")
+    monkeypatch.setenv("VERCEL", "1")
+    assert ST.open_store() is None                                           # ephemeral disk: no silent SQLite
+    assert isinstance(ST.open_store(str(tmp_path / "x.db")), ST.SQLiteStore)  # explicit path always wins
+    assert ST._clean_url("postgres://u:p@h/db?sslmode=require&supa=base") == "postgres://u:p@h/db?sslmode=require"
+
+
+def test_api_dedupe_flow(monkeypatch):
+    from api import search as A
+    monkeypatch.delenv("API_KEY", raising=False)
+    pages = lambda: [make_page(0, 20, True, 20), make_page(20, 20, False, 40)]
+    seq = []
+
+    def real(query, limit, **kw):
+        r = S.search_videos(query, limit, client=FakeClient(pages()), **{**kw, "pause": 0})
+        seq.append(r)
+        return r
+
+    monkeypatch.setattr(A, "search_videos", real)
+    a = json.loads(A.run("q=nasa&limit=20", {})[2])
+    status, _, body, extra = A.run("q=Nasa&limit=20", {})
+    b = json.loads(body)
+    assert not set(a["urls"]) & set(b["urls"]) and extra["Cache-Control"] == "no-store"
+    assert b["deduplicated"] is True and A.run("q=nasa&limit=20&reset=1", {})[0] == 403   # needs an API key
+    monkeypatch.setenv("API_KEY", "k")
+    c = json.loads(A.run("q=nasa&limit=20&reset=1&key=k", {})[2])
+    assert c["urls"] == a["urls"]                                            # history cleared -> starts over
+    assert A.run("reset=1&key=k&q=", {})[0] == 400
+
+
+def test_api_without_database_warns_but_works(monkeypatch):
+    from api import search as A
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("TIKTOK_DB")
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setattr(A, "search_videos", lambda q, n, **kw: {"urls": [], "videos": [], "error": None})
+    status, _, body, extra = A.run("q=nasa", {})
+    assert status == 200 and "DATABASE_URL" in json.loads(body)["warning"] and "s-maxage" in extra["Cache-Control"]

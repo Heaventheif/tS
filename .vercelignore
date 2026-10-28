@@ -1,3 +1,4 @@
 tests/
 README.md
 requirements-dev.txt
+*.db

@@ -127,8 +127,13 @@ def search_page(query, *, client=None, country=None, sort="relevance", published
 
 
 def search_videos(query, limit=20, *, country=None, sort="relevance", published=None, max_pages=50,
-                  pause=PAGE_PAUSE, client=None, cursor=None):
+                  pause=PAGE_PAUSE, client=None, cursor=None, store=None):
     """Up to `limit` unique videos for the keyword, paging automatically.
+
+    With a `store` (see store.py) only videos never delivered before for this
+    keyword are returned, and the delivered ones are recorded, so repeating the
+    same search yields fresh links each time. Pages keep being read until `limit`
+    new videos are found, TikTok runs out, or `max_pages` is hit.
 
     Stops at `limit`, when TikTok has no more results, or after `max_pages`.
     If a later page fails, the videos already collected are returned along
@@ -142,7 +147,7 @@ def search_videos(query, limit=20, *, country=None, sort="relevance", published=
         raise ValueError("limit must be at least 1")
     own = client is None
     client = client or TikTok()
-    found, seen, error, pages = [], set(), None, 0
+    found, seen, error, pages, skipped = [], set(), None, 0, 0
     try:
         while len(found) < limit and pages < max_pages:
             if pages and pause:
@@ -157,10 +162,15 @@ def search_videos(query, limit=20, *, country=None, sort="relevance", published=
                 error = f"{type(e).__name__}: {e}"
                 break
             pages += 1
+            known = store.known_ids(query, [v["id"] for v in page["videos"]]) if store else set()
             for video in page["videos"]:
-                if video["id"] not in seen:
-                    seen.add(video["id"])
-                    found.append(video)
+                if video["id"] in seen:
+                    continue
+                seen.add(video["id"])
+                if video["id"] in known:
+                    skipped += 1
+                    continue
+                found.append(video)
             cursor = page["next_cursor"]
             if cursor is None:
                 break
@@ -168,6 +178,9 @@ def search_videos(query, limit=20, *, country=None, sort="relevance", published=
         if own:
             client.close()
     found = found[:limit]
+    if store and found:
+        found = store.claim(query, found)       # only what is recorded is returned; overshoot stays unclaimed
     return {"query": query, "sort": sort, "published": published, "video_count": len(found), "videos": found,
             "urls": [v["url"] for v in found], "next_cursor": cursor, "has_more": cursor is not None,
-            "error": error}
+            "error": error, "deduplicated": store is not None, "skipped_seen": skipped,
+            "exhausted": store is not None and cursor is None and error is None and len(found) < limit}
