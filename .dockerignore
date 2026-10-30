@@ -1,0 +1,17 @@
+# ملفات لا معنى لحملها داخل صورة Docker
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.git
+.gitignore
+.env
+.venv/
+venv/
+*.db
+*.log
+.vercel
+.vercelignore
+tests/
+output/
+Dockerfile
+.dockerignore

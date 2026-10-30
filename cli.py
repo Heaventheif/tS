@@ -11,7 +11,7 @@
 
 Delivered links are remembered per keyword in seen_videos.db (or --db / $TIKTOK_DB,
 or Postgres via $DATABASE_URL) and never returned again.
-Environment: TIKTOK_PROXY=http://user:pass@host:port (optional).
+Environment: $TIKTOK_DB (SQLite file) or $DATABASE_URL (Postgres) for the history.
 """
 import argparse
 import json

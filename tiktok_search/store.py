@@ -8,7 +8,7 @@ Two interchangeable backends share one schema:
 
   * SQLite  (standard library, zero setup) — local runs and the CLI.
                 file: $TIKTOK_DB or ./seen_videos.db
-  * Postgres (psycopg) — needed on Vercel, whose filesystem is ephemeral.
+  * Postgres (psycopg) — needed on Vercel/Render, whose filesystems are ephemeral.
                 url:  $DATABASE_URL (or $POSTGRES_URL), e.g. a free Neon database.
 
 Keywords are normalised (Unicode NFKC, lower-cased, whitespace collapsed) so
@@ -117,8 +117,8 @@ def open_store(path=None):
     """Pick the backend from the environment. Returns None when no durable storage is available.
 
     An explicit `path` always means SQLite. Otherwise: $DATABASE_URL / $POSTGRES_URL -> Postgres,
-    $TIKTOK_DB -> SQLite, on Vercel without a database -> None (its disk is not persistent),
-    anywhere else -> ./seen_videos.db.
+    $TIKTOK_DB -> SQLite, on Vercel/Render without a database -> None (their disks are not
+    persistent), anywhere else -> ./seen_videos.db.
     """
     if path:
         return SQLiteStore.connect(path)
@@ -128,6 +128,9 @@ def open_store(path=None):
     path = os.environ.get("TIKTOK_DB")
     if path:
         return SQLiteStore.connect(path)
-    if os.environ.get("VERCEL"):
+    # قرص Vercel وقرص Render المجاني مؤقتان (يفقدان الملفات عند كل إيقاظ/نشر):
+    # SQLite محلي هناك سيفقد سجل منع التكرار بصمت. الفحص يحدث بعد فحص
+    # DATABASE_URL وTIKTOK_DB، فمن يضبط أحدهما يبقى محميًا ويصل إلى تخزينه.
+    if os.environ.get("VERCEL") or os.environ.get("RENDER"):
         return None
     return SQLiteStore.connect(DEFAULT_DB)

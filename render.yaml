@@ -1,0 +1,37 @@
+# Blueprint الخاص بـ Render: أنشئ الخدمة من المستودع مباشرة
+# (Render -> New + -> Blueprint -> اختر هذا المستودع)
+#
+# خدمة Web طويلة العمر (Long-running server) بدل Vercel Serverless:
+# البناء يثبّت المتطلبات فقط، والتشغيل عبر python server.py.
+services:
+  - type: web
+    name: tiktok-video-search
+    runtime: python
+    plan: free                       # الخطة المجانية تنام بعد ~15 دقيقة خمول (انظر DEPLOY_RENDER.md)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION          # نسخة Python التي يبني بها Render
+        value: "3.12.6"
+      - key: LOG_LEVEL               # DEBUG | INFO | WARNING | ERROR
+        value: info
+      # ---- متغيرات اختيارية (أضفها من لوحة Render -> Environment إن احتجتها) ----
+      # API_KEY      : حماية الواجهة — يُرسل المفتاح في ترويسة x-api-key أو ?key=
+      # DATABASE_URL : Postgres لمنع تكرار الروابط (مثلاً Neon المجاني أو Render Postgres)
+      # TIKTOK_DB    : بديل — مسار SQLite على Render Disk دائم، مثلاً /data/seen_videos.db
+      #
+      # اختياري: قاعدة Postgres من Render نفسها (الخطة المجانية تنتهي بعد 30 يومًا) —
+      # أزل التعليق عن الأسطر التالية لإنشائها وربطها تلقائيًا:
+      #
+      # databases:
+      #   - name: tiktok-search-db
+      #     databaseName: tiktoksearch
+      #     plan: free
+      #
+      # ثم أضف داخل envVars أعلاه:
+      #   - key: DATABASE_URL
+      #     fromDatabase:
+      #       name: tiktok-search-db
+      #       property: connectionString

@@ -61,27 +61,29 @@ Recording is atomic (`INSERT … ON CONFLICT DO NOTHING`), so two simultaneous r
 |---|---|
 | local / CLI | nothing — SQLite file `seen_videos.db` |
 | Vercel | `DATABASE_URL` = a Postgres connection string (e.g. free Neon: Vercel → Storage → Neon). The table is created automatically. |
+| Render | same as Vercel: `DATABASE_URL` (Postgres), or `TIKTOK_DB` pointing at a file on a persistent Render Disk. The table is created automatically. |
 
-Vercel's disk is ephemeral, so SQLite cannot be used there. Without `DATABASE_URL` the API still works but
-adds a `warning` and cannot deduplicate. If a database is configured but unreachable the API answers 503
-instead of silently returning repeats.
+Vercel's and Render's (free plan) disks are ephemeral, so SQLite cannot be silently used there. Without
+`DATABASE_URL` the API still works but adds a `warning` and cannot deduplicate. If a database is configured
+but unreachable the API answers 503 instead of silently returning repeats.
 
-## Proxy (optional)
+## Run as a standalone server (Render, long-running)
 ```bash
-export TIKTOK_PROXY=http://user:pass@host:port
-# if your provider picks the country in the URL, put {country} where the code goes:
-export TIKTOK_PROXY=http://user-cr.{country}:pass@host:port
+python server.py                 # local: http://0.0.0.0:10000  (PORT / HOST / LOG_LEVEL env vars)
 ```
-Video search answers only from US exits. If TikTok is blocked where you run, use a proxy.
+Same endpoints and same responses as the Vercel deployment (`/`, `/search`, `/api/search`, `/health`).
+The service is designed to run on Render as a Web Service — see **DEPLOY_RENDER.md** for the full
+deployment guide (Blueprint `render.yaml`, plain Web Service, or Docker) and for environment variables.
+No network intermediary of any kind is used: the resilience features (extra fresh sessions, escalating
+backoff, clear logs) live in `tiktok_search/client.py`.
 
-## Deploy as an API on Vercel
+## Deploy as an API on Vercel (backup option)
 ```bash
 npm i -g vercel
 vercel            # first deploy (preview)
 vercel --prod
 ```
 Environment variables (Project → Settings → Environment Variables):
-- `TIKTOK_PROXY` — recommended. TikTok often refuses datacenter IPs such as Vercel's; a residential US proxy fixes it.
 - `DATABASE_URL` — **required for no-repeat links** (Postgres, see above).
 - `API_KEY` — optional. When set, send it as the `x-api-key` header or `?key=`.
 
@@ -105,6 +107,10 @@ python -m pytest -q     # offline, no network
 ## Layout
 ```
 cli.py                   command line
+server.py                standalone HTTP server (Render / any host, long-running)
+render.yaml              Render Blueprint (Web Service: build + start + /health)
+Dockerfile               optional Docker deployment option
+DEPLOY_RENDER.md         step-by-step Render deployment guide (Arabic)
 api/search.py            Vercel endpoint (/api/search)
 vercel.json              function timeout + /search rewrite
 tiktok_search/search.py  search + automatic paging + parsing + skipping seen links

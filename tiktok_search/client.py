@@ -16,19 +16,33 @@ The silent empty body is TikTok's one block signal (-> Blocked). The very
 first signed call of a session is often dropped, so a fresh session gets one
 free retry.
 
-Set TIKTOK_PROXY=http://user:pass@host:port to route through a proxy; put
-`{country}` in the URL where a 2-letter country code goes if your provider
-targets countries that way.
+التشغيل بلا proxy (قرار تصميم نهائي — لا يوجد أي بروكسي في المشروع):
+صمود الحجب يتم داخل العملية فقط عبر الأدوات التالية:
+
+  * جلسات متعددة لكل إقليم (SESSIONS_PER_COUNTRY): كل جلسة تُولد بمعرّف
+    جهاز عشوائي جديد وكوكيز جديدة بعد boot صفحة حقيقية، فتبدو للطرف الآخر
+    كمتصفح جديد قادم من نفس الخادم؛
+  * تهدئة تصاعدية بين الجلسات (RETRY_BACKOFF: 0.5s ثم 1s ثم 2s) بعشوائية
+    بسيطة تكسر نمط توقيت المحاولات الآلية؛
+  * إعادة استخدام الجلسة السليمة حتى SESSION_MAX_AGE: تقليل عدد عمليات
+    boot الإضافية يقلل التعرض للفحص ويجعل الإيقاع أقرب لمتصفح حقيقي؛
+  * سجل واضح يفرّق بين خطأ الكود وحجب IP مركز البيانات، ورسالة 502 مفهومة.
+
+إذا فشلت كل الجلسات فالسبب المرجّح أن عنوان IP مركز البيانات نفسه مصنّف
+كغير مرغوب — هذا لا يُحل داخل الكود؛ انظر DEPLOY_RENDER.md للبدائل
+المشروعة (لا يوجد ولا يُقترح أي proxy).
 """
 import json
+import logging
 import os
 import random
 import re
 import time
-from urllib.parse import urlencode
 
 from . import signer
 from .errors import BadRequest, Blocked, UpstreamError
+
+log = logging.getLogger("tiktok_search.client")   # يظهر في stdout عبر إعداد server.py
 
 WWW = "https://www.tiktok.com"
 IMPERSONATE = "chrome"
@@ -40,10 +54,16 @@ USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.3
 
 API_TIMEOUT = 30
 PAGE_TIMEOUT = 45
-SESSIONS_PER_COUNTRY = 2       # fresh sessions tried per country before moving on
+# من 2 إلى 3 جلسات جديدة لكل إقليم: محاولات أكثر ترفع فرص النجاح بلا proxy.
+# يمكن ضبطها من البيئة دون تعديل الكود: TIKTOK_SESSIONS_PER_COUNTRY=4
+SESSIONS_PER_COUNTRY = max(1, int(os.environ.get("TIKTOK_SESSIONS_PER_COUNTRY") or 3))
 SESSION_MAX_AGE = 1800         # seconds a session is reused
 BOOT_PATH = "/@tiktok"         # any profile page sets the session cookies
 LOGIN_WALL_STATUS = 2483
+
+# تهدئة تصاعدية بين محاولات الجلسات داخل search_get: 0.5s ثم 1s ثم 2s
+# (تبقى 2s لما بعدها) وتُضرب بعامل عشوائي بسيط حتى لا يكون التوقيت نمطًا ثابتًا.
+RETRY_BACKOFF = (0.5, 1.0, 2.0)
 
 PAGE_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -81,14 +101,12 @@ def status_of(payload):
 class _Session:
     """One curl session on one exit, with its own device id and cookie jar."""
 
-    def __init__(self, country, proxy):
+    def __init__(self, country):
         from curl_cffi import requests as curl_requests
         self.session = curl_requests.Session(impersonate=IMPERSONATE)
-        if proxy:
-            proxy = proxy.replace("{country}", country.lower())
-            self.session.proxies = {"http": proxy, "https": proxy}
         self.session.headers.update({"user-agent": USER_AGENT, "accept-language": "en-US,en;q=0.9"})
         self.country = country
+        # معرّف جهاز عشوائي جديد لكل جلسة: جلسة جديدة = هوية متصفح جديدة
         self.device_id = str(random.randint(7250000000000000000, 7351147085025500000))
         self.born = time.time()
         self.booted = False
@@ -187,8 +205,7 @@ class TikTok:
     """Keeps one booted session alive across calls, so paging a search reuses
     the same cookies, and swaps it for a fresh one when it stops answering."""
 
-    def __init__(self, proxy=None):
-        self.proxy = proxy or os.environ.get("TIKTOK_PROXY") or None
+    def __init__(self):
         self._session = None
 
     def close(self):
@@ -201,13 +218,24 @@ class TikTok:
         if current and current.country == country and time.time() - current.born < SESSION_MAX_AGE:
             return current
         self.close()
-        return _Session(country, self.proxy)
+        return _Session(country)
 
     def search_get(self, path, params, countries, referer=WWW + "/search"):
-        """A booted + signed call, trying each country's exits in order."""
+        """A booted + signed call, trying each country's exits in order.
+
+        بلا proxy: بعد كل جلسة فاشلة تُهدا العملية مدةً متصاعدة (0.5s ثم 1s
+        ثم 2s) قبل بدء جلسة جديدة نظيفة — إعادة الضرب فورًا وبسرعة من نفس
+        الـ IP تزيد الحجب ولا تحلّه، فالتهدئة جزء من الحل.
+        """
         last = None
+        tried = 0                                       # عدد الجلسات المُجرّبة في هذا الطلب
+        budget = SESSIONS_PER_COUNTRY * len(countries)
         for country in countries:
             for _ in range(SESSIONS_PER_COUNTRY):
+                if tried:                               # تهدئة تصاعدية بين الجلسات
+                    delay = RETRY_BACKOFF[min(tried, len(RETRY_BACKOFF)) - 1]
+                    time.sleep(delay * (0.75 + 0.5 * random.random()))
+                tried += 1
                 session = self._session_for(country)
                 self._session = session
                 # a session often drops its FIRST signed call, so give it one retry
@@ -215,18 +243,20 @@ class TikTok:
                 try:
                     if not session.booted:
                         session.boot()
-                    for attempt in range(tries):
+                    for t in range(tries):
                         try:
                             payload = session.get_json(path, params, referer)
                             break
                         except Blocked as e:
                             last = e
-                            if attempt + 1 == tries:
+                            log.warning("blocked attempt %d/%d on region %s: %s", tried, budget, country, e)
+                            if t + 1 == tries:
                                 raise
                 except BadRequest:
                     raise
                 except UpstreamError as e:
                     last = e
+                    log.warning("session %d/%d on region %s failed: %s", tried, budget, country, e)
                     self.close()
                     continue
                 session.answered = True
@@ -234,13 +264,29 @@ class TikTok:
                 if status != 0:
                     raise UpstreamError(f"search: upstream status {status} {payload.get('status_msg') or ''}".strip())
                 return payload
+        if isinstance(last, Blocked):
+            # السجل الأخير يجب أن يوضح للمشغّل أن السبب عنوان IP الخادم وليس خطأ في الكود
+            log.error("all %d session attempts were blocked — احتمال حجب IP مركز البيانات من تيك توك "
+                      "(لم يُضبط proxy ولا هو مطلوب هنا): أعد المحاولة لاحقًا أو خفف معدل الاستخدام؛ "
+                      "هذه مشكلة شبكة/IP وليست خطأ في الكود", tried)
+            raise Blocked(f"{last} — all {tried} session attempts were blocked: "
+                          f"احتمال حجب IP مركز البيانات — لم يُضبط proxy؛ أعد المحاولة لاحقًا")
         raise last or UpstreamError("search failed")
 
 
 def country_order(country, *fallbacks):
-    """`country` (default "us") first, then the fallbacks, de-duplicated."""
+    """`country` (default "us") first, then the fallbacks, de-duplicated.
+
+    توسيع اختياري للمخارج الاحتياطية بلا proxy: المتغير TIKTOK_COUNTRIES
+    (مثلاً "us,ca,au") يضيف مناطق احتياطية بعد المخارج الصريحة، بشرط أن تكون
+    رموز ISO 3166-1 alpha-2 صالحة — رموز مثل "us2" غير مقبولة لأن معامل
+    region في تيك توك يقتصر على رمز ISO ثنائي الأحرف. الافتراضي بدون المتغير
+    يبقى "us" فقط مع مزيد من الجلسات والتهدئة التصاعدية.
+    """
+    extra = tuple(c.strip().lower() for c in (os.environ.get("TIKTOK_COUNTRIES") or "").split(",")
+                  if c.strip())
     order = []
-    for code in (country or "us",) + fallbacks:
+    for code in (country or "us",) + fallbacks + extra:
         code = (code or "").lower()
         if code and code not in order:
             order.append(code)
